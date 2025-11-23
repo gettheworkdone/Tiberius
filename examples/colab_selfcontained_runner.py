@@ -12,8 +12,8 @@ legend derived from Gabriel et al. 2024 (Bioinformatics 40(12):btae685).
 Usage inside Colab (single cell):
 
 ```python
-# 1) install deps
-!pip install tensorflow==2.12 numpy biopython requests
+# 1) install deps (TensorFlow < 2.18 is required; 2.17.1 works on Colab)
+!pip install "tensorflow<2.18" numpy biopython requests
 
 # 2) paste the contents of this file into a cell and run it
 
