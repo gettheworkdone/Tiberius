@@ -12,12 +12,12 @@ legend derived from Gabriel et al. 2024 (Bioinformatics 40(12):btae685).
 Usage inside Colab (single cell):
 
 ```python
-# 1) install deps (TensorFlow < 2.18 is required; 2.17.1 works on Colab)
-!pip install "tensorflow<2.18" numpy biopython requests
+# 1) install deps (pin JAX/ml-dtypes versions compatible with TF 2.17.1)
+!pip install "tensorflow==2.17.1" "jax==0.4.24" "jaxlib==0.4.24" "ml-dtypes==0.4.0" numpy biopython requests
 
 # 2) paste the contents of this file into a cell and run it
 
-# 3) configure and execute
+# 3) configure and execute (defaults use the non-softmasking mammalian weights)
 results = run_colab_inference(
     fasta_paths=["/content/my_genome.fa"],  # list of FASTA paths
     output_npy="/content/hmm_labels.npy",
@@ -39,11 +39,26 @@ import gzip
 import json
 import math
 import os
+import subprocess
+import sys
 import tempfile
 from typing import Dict, Iterable, List, Optional, Sequence, Tuple
 
 import numpy as np
 import requests
+
+# Preemptively align JAX/ml-dtypes versions with TensorFlow 2.17.1 to avoid import errors.
+subprocess.check_call([
+    sys.executable,
+    "-m",
+    "pip",
+    "install",
+    "-q",
+    "jax==0.4.24",
+    "jaxlib==0.4.24",
+    "ml-dtypes==0.4.0",
+])
+
 import tensorflow as tf
 from Bio import SeqIO
 from tensorflow.keras import backend as K
@@ -386,8 +401,9 @@ class PredictionGTF:
 # ---------------------------------------------------------------------------
 
 MODEL_CONFIG = {
-    "weights_url": "https://zenodo.org/record/10915840/files/hg38_softmask_model.tgz?download=1",
-    "softmasking": True,
+    # Non-softmasking mammalian weights from README
+    "weights_url": "https://bioinf.uni-greifswald.de/bioinf/tiberius/models/tiberius_nosm_weights.tgz",
+    "softmasking": False,
     "output_size": 7,
     "units": 200,
     "filter_size": 64,
@@ -417,9 +433,9 @@ LABEL_DOC = {
 }
 
 
-def download_weights(dest_dir: str) -> str:
+def download_weights_bundle(dest_dir: str) -> str:
     os.makedirs(dest_dir, exist_ok=True)
-    archive = os.path.join(dest_dir, "hg38_softmask_model.tgz")
+    archive = os.path.join(dest_dir, "tiberius_nosm_weights.tgz")
     if not os.path.exists(archive):
         with requests.get(MODEL_CONFIG["weights_url"], stream=True) as r:
             r.raise_for_status()
@@ -429,10 +445,10 @@ def download_weights(dest_dir: str) -> str:
     import tarfile
     with tarfile.open(archive, "r:gz") as tar:
         tar.extractall(dest_dir)
-    return os.path.join(dest_dir, "hg38_softmask_model")
+    return os.path.join(dest_dir, "tiberius_nosm_weights")
 
 
-def load_or_init_lstm(weights_path: Optional[str], softmask=True) -> Model:
+def load_or_init_lstm(weights_path: Optional[str], softmask: bool = MODEL_CONFIG["softmasking"]) -> Model:
     cfg = MODEL_CONFIG
     model = lstm_model(
         units=cfg["units"],
@@ -458,6 +474,7 @@ def run_colab_inference(
     strand: str = "+",
     seq_len: int = 1800,
     batch_size: int = 4,
+    softmask: bool = MODEL_CONFIG["softmasking"],
 ):
     genome = {}
     for fp in fasta_paths:
@@ -468,14 +485,23 @@ def run_colab_inference(
     weights_dir = None
     if download_weights:
         cache_dir = tempfile.mkdtemp(prefix="tiberius_weights_")
-        weights_dir = download_weights(cache_dir)
-    lstm = load_or_init_lstm(weights_dir if download_weights else None, softmask=True)
-    runner = PredictionGTF(genome=genome, seq_len=seq_len, batch_size=batch_size, softmask=True, strand=strand, parallel_factor=1)
+        weights_dir = download_weights_bundle(cache_dir)
+    lstm = load_or_init_lstm(weights_dir if download_weights else None, softmask=softmask)
+    runner = PredictionGTF(
+        genome=genome,
+        seq_len=seq_len,
+        batch_size=batch_size,
+        softmask=softmask,
+        strand=strand,
+        parallel_factor=1,
+    )
     runner.lstm_model = lstm
     runner.make_default_hmm(inp_size=lstm.output_shape[-1])
     fasta = runner.init_fasta(chunk_len=seq_len)
     seq_names = fasta.sequence_names
-    f_chunk, coords, adapted_len = runner.load_genome_data(fasta, seq_names=seq_names, strand=strand, softmask=True)
+    f_chunk, coords, adapted_len = runner.load_genome_data(
+        fasta, seq_names=seq_names, strand=strand, softmask=softmask
+    )
     runner.adapt_batch_size(adapted_len)
     lstm_pred = runner.lstm_prediction(f_chunk, batch_size=runner.adapted_batch_size)
     labels = runner.hmm_predictions_filtered(f_chunk, lstm_pred, batch_size=runner.adapted_batch_size) if apply_filtering else runner.hmm_predictions(f_chunk, lstm_pred, batch_size=runner.adapted_batch_size)
